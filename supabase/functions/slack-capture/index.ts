@@ -217,6 +217,7 @@ Deno.serve(async (req) => {
       if (
         event.type === "message" &&
         !event.subtype && // exclude edits, deletions, bot messages
+        !event.bot_id && // exclude bot messages (prevents reply loop)
         event.text &&
         event.text.trim().length > 0
       ) {
