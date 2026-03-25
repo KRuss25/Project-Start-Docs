@@ -218,6 +218,8 @@ Deno.serve(async (req) => {
         event.type === "message" &&
         !event.subtype && // exclude edits, deletions, bot messages
         !event.bot_id && // exclude bot messages (prevents reply loop)
+        event.user && // must be a real user, not a bot
+        !event.text?.startsWith("\uD83E\uDDE0 Captured") && // safety: skip our own replies
         event.text &&
         event.text.trim().length > 0
       ) {
