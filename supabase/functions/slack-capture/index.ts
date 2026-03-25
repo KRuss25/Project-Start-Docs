@@ -117,15 +117,15 @@ async function isDuplicate(slackEventId: string): Promise<boolean> {
   return (data?.length ?? 0) > 0;
 }
 
-// --- Post a confirmation reply in the Slack thread ---
-async function postSlackReply(channel: string, ts: string, metadata: Record<string, unknown>): Promise<void> {
+// --- Post an ephemeral confirmation (only visible to the sender, fires no events) ---
+async function postSlackReply(channel: string, ts: string, userId: string, metadata: Record<string, unknown>): Promise<void> {
   if (!SLACK_BOT_TOKEN) return;
 
   const type = metadata.type ?? "observation";
   const topics: string[] = (metadata.topics as string[]) ?? [];
   const topicsStr = topics.length ? ` · ${topics.slice(0, 3).join(", ")}` : "";
 
-  await fetch("https://slack.com/api/chat.postMessage", {
+  await fetch("https://slack.com/api/chat.postEphemeral", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
@@ -133,6 +133,7 @@ async function postSlackReply(channel: string, ts: string, metadata: Record<stri
     },
     body: JSON.stringify({
       channel,
+      user: userId,
       thread_ts: ts,
       text: `🧠 Captured to Open Brain · *${type}*${topicsStr}`,
     }),
@@ -140,7 +141,7 @@ async function postSlackReply(channel: string, ts: string, metadata: Record<stri
 }
 
 // --- Main capture logic (runs async after 200 is returned) ---
-async function captureThought(text: string, slackEventId: string, channel: string, ts: string): Promise<void> {
+async function captureThought(text: string, slackEventId: string, channel: string, ts: string, userId: string): Promise<void> {
   // Deduplication check — handles Slack retries that slipped through
   if (await isDuplicate(slackEventId)) {
     console.log(`Duplicate event skipped: ${slackEventId}`);
@@ -162,7 +163,7 @@ async function captureThought(text: string, slackEventId: string, channel: strin
     console.error("Insert error:", error);
   } else {
     console.log(`Captured thought (event: ${slackEventId})`);
-    await postSlackReply(channel, ts, metadata);
+    await postSlackReply(channel, ts, userId, metadata);
   }
 }
 
@@ -199,6 +200,7 @@ Deno.serve(async (req) => {
     let messageText = "";
     let channel = "";
     let ts = "";
+    let userId = "";
 
     if (CAPTURE_REACTION) {
       // Reaction-to-capture mode: only capture on specific emoji reaction
@@ -228,6 +230,7 @@ Deno.serve(async (req) => {
           shouldCapture = true;
           channel = event.channel;
           ts = event.ts;
+          userId = event.user;
         }
       }
     }
@@ -236,7 +239,7 @@ Deno.serve(async (req) => {
       // *** THE CRITICAL FIX ***
       // Return 200 to Slack IMMEDIATELY, then process async.
       // EdgeRuntime.waitUntil keeps the function alive after the response is sent.
-      EdgeRuntime.waitUntil(captureThought(messageText, eventId, channel, ts));
+      EdgeRuntime.waitUntil(captureThought(messageText, eventId, channel, ts, userId));
     }
   }
 
