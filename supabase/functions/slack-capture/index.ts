@@ -156,9 +156,14 @@ Deno.serve(async (req) => {
     });
   }
 
-  // Verify Slack signature for all other requests
-  if (!(await verifySlackSignature(req, body))) {
-    return new Response("Unauthorized", { status: 401 });
+  // Verify Slack signature for all other requests.
+  // Skip if SLACK_SIGNING_SECRET is not configured (logs a warning).
+  if (SLACK_SIGNING_SECRET) {
+    if (!(await verifySlackSignature(req, body))) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+  } else {
+    console.warn("SLACK_SIGNING_SECRET not set — skipping signature verification");
   }
 
   // Handle message events
