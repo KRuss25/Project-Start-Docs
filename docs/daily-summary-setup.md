@@ -20,7 +20,7 @@ In your Supabase dashboard → **Project Settings** → **Edge Functions** → *
 | Secret Name | Value |
 |---|---|
 | `SLACK_DAILY_SUMMARY_WEBHOOK` | Your Slack Incoming Webhook URL (see below) |
-| `OB1_ACCESS_KEY` | The same 64-char hex key you use for your Open Brain MCP server |
+| `MCP_ACCESS_KEY` | Already set — this is the same key from your Open Brain MCP setup (Step 5 of Nate's guide) |
 
 ### Create the Slack Incoming Webhook
 
@@ -54,7 +54,7 @@ supabase functions deploy daily-summary
 ```bash
 curl -X POST \
   https://YOUR_PROJECT_ID.supabase.co/functions/v1/daily-summary \
-  -H "x-access-key: YOUR_OB1_ACCESS_KEY"
+  -H "x-brain-key: YOUR_MCP_ACCESS_KEY"
 ```
 
 You should see a Slack message appear (or `{"sent": false, "reason": "no_thoughts"}` if nothing was captured today yet).
@@ -119,7 +119,7 @@ Sent by Open Brain · React with 🧠 on any Slack message to capture it
 
 **Edge function returns 500:**
 - Check Supabase **Edge Functions** → **Logs** for the error
-- Confirm your `thoughts` table has `created_at`, `content`, `source`, and `tags` columns
+- Confirm your `thoughts` table has `content`, `created_at`, and `metadata` columns (standard OB1 schema)
 
 **"Unauthorized" response:**
-- The `x-access-key` header doesn't match `OB1_ACCESS_KEY` in your Supabase secrets
+- The `x-brain-key` header doesn't match `MCP_ACCESS_KEY` in your Supabase secrets

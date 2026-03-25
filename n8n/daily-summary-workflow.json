@@ -35,8 +35,8 @@
         "headerParameters": {
           "parameters": [
             {
-              "name": "x-access-key",
-              "value": "={{ $vars.OB1_ACCESS_KEY }}"
+              "name": "x-brain-key",
+              "value": "={{ $vars.MCP_ACCESS_KEY }}"
             }
           ]
         },
@@ -44,7 +44,7 @@
           "timeout": 30000
         }
       },
-      "notes": "Replace YOUR_SUPABASE_PROJECT_ID with your actual project ID. Store OB1_ACCESS_KEY as an n8n variable or credential."
+      "notes": "Replace YOUR_SUPABASE_PROJECT_ID with your actual project ID. Store MCP_ACCESS_KEY as an n8n variable — same key you set in Supabase secrets."
     },
     {
       "id": "check-response",

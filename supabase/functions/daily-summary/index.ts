@@ -1,5 +1,5 @@
 // Supabase Edge Function: daily-summary
-// Queries recent Open Brain thoughts and sends a digest to Slack.
+// Queries Open Brain thoughts from the last 24h and sends a Slack digest.
 // Deploy with: supabase functions deploy daily-summary
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -7,14 +7,14 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const SLACK_WEBHOOK_URL = Deno.env.get("SLACK_DAILY_SUMMARY_WEBHOOK")!;
-// Optional: restrict which callers can invoke this function
-const ACCESS_KEY = Deno.env.get("OB1_ACCESS_KEY");
+// Uses the same access key as your MCP server (stored as MCP_ACCESS_KEY in Supabase)
+const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");
 
 Deno.serve(async (req) => {
-  // Simple key auth when called via cron webhook
-  if (ACCESS_KEY) {
-    const authHeader = req.headers.get("x-access-key");
-    if (authHeader !== ACCESS_KEY) {
+  // Simple key auth — called by your n8n cron job
+  if (MCP_ACCESS_KEY) {
+    const authHeader = req.headers.get("x-brain-key");
+    if (authHeader !== MCP_ACCESS_KEY) {
       return new Response("Unauthorized", { status: 401 });
     }
   }
@@ -26,7 +26,7 @@ Deno.serve(async (req) => {
 
   const { data: thoughts, error } = await supabase
     .from("thoughts")
-    .select("content, created_at, source, tags")
+    .select("content, created_at, metadata")
     .gte("created_at", since)
     .order("created_at", { ascending: false });
 
@@ -39,13 +39,15 @@ Deno.serve(async (req) => {
   }
 
   if (!thoughts || thoughts.length === 0) {
-    console.log("No thoughts captured in the last 24 hours — skipping Slack message.");
+    console.log("No thoughts in the last 24 hours — skipping.");
     return new Response(JSON.stringify({ sent: false, reason: "no_thoughts" }), {
       headers: { "Content-Type": "application/json" },
     });
   }
 
   // Format the Slack message
+  // metadata is a JSONB field with shape:
+  // { type, topics: string[], people: string[], action_items: string[], source }
   const dateLabel = new Date().toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
@@ -59,9 +61,16 @@ Deno.serve(async (req) => {
         minute: "2-digit",
         hour12: true,
       });
-      const tags = t.tags?.length ? ` _[${t.tags.join(", ")}]_` : "";
-      const source = t.source ? ` *(${t.source})*` : "";
-      return `• ${t.content}${tags}${source} — ${time}`;
+      const meta = t.metadata ?? {};
+      const topics: string[] = meta.topics ?? [];
+      const type: string = meta.type ?? "";
+      const source: string = meta.source ?? "";
+
+      const topicsStr = topics.length ? ` _[${topics.slice(0, 3).join(", ")}]_` : "";
+      const typeStr = type ? ` *(${type})*` : "";
+      const sourceStr = source && source !== "mcp" ? ` — via ${source}` : "";
+
+      return `• ${t.content}${typeStr}${topicsStr}${sourceStr} — ${time}`;
     })
     .join("\n");
 
@@ -111,9 +120,9 @@ Deno.serve(async (req) => {
   });
 
   if (!slackRes.ok) {
-    const body = await slackRes.text();
-    console.error("Slack webhook error:", body);
-    return new Response(JSON.stringify({ error: "Slack delivery failed", detail: body }), {
+    const detail = await slackRes.text();
+    console.error("Slack webhook error:", detail);
+    return new Response(JSON.stringify({ error: "Slack delivery failed", detail }), {
       status: 502,
       headers: { "Content-Type": "application/json" },
     });
