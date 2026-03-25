@@ -15,6 +15,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 const SLACK_SIGNING_SECRET = Deno.env.get("SLACK_SIGNING_SECRET")!;
+const SLACK_BOT_TOKEN = Deno.env.get("SLACK_BOT_TOKEN")!;
 // Optional: only capture from a specific channel ID (e.g. "C12345678")
 // Leave empty to capture from all channels the app is in.
 const CAPTURE_CHANNEL_ID = Deno.env.get("SLACK_CAPTURE_CHANNEL_ID") ?? "";
@@ -116,8 +117,30 @@ async function isDuplicate(slackEventId: string): Promise<boolean> {
   return (data?.length ?? 0) > 0;
 }
 
+// --- Post a confirmation reply in the Slack thread ---
+async function postSlackReply(channel: string, ts: string, metadata: Record<string, unknown>): Promise<void> {
+  if (!SLACK_BOT_TOKEN) return;
+
+  const type = metadata.type ?? "observation";
+  const topics: string[] = (metadata.topics as string[]) ?? [];
+  const topicsStr = topics.length ? ` · ${topics.slice(0, 3).join(", ")}` : "";
+
+  await fetch("https://slack.com/api/chat.postMessage", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      channel,
+      thread_ts: ts,
+      text: `🧠 Captured to Open Brain · *${type}*${topicsStr}`,
+    }),
+  });
+}
+
 // --- Main capture logic (runs async after 200 is returned) ---
-async function captureThought(text: string, slackEventId: string): Promise<void> {
+async function captureThought(text: string, slackEventId: string, channel: string, ts: string): Promise<void> {
   // Deduplication check — handles Slack retries that slipped through
   if (await isDuplicate(slackEventId)) {
     console.log(`Duplicate event skipped: ${slackEventId}`);
@@ -139,6 +162,7 @@ async function captureThought(text: string, slackEventId: string): Promise<void>
     console.error("Insert error:", error);
   } else {
     console.log(`Captured thought (event: ${slackEventId})`);
+    await postSlackReply(channel, ts, metadata);
   }
 }
 
@@ -173,6 +197,8 @@ Deno.serve(async (req) => {
 
     let shouldCapture = false;
     let messageText = "";
+    let channel = "";
+    let ts = "";
 
     if (CAPTURE_REACTION) {
       // Reaction-to-capture mode: only capture on specific emoji reaction
@@ -197,6 +223,8 @@ Deno.serve(async (req) => {
         if (!CAPTURE_CHANNEL_ID || event.channel === CAPTURE_CHANNEL_ID) {
           messageText = event.text;
           shouldCapture = true;
+          channel = event.channel;
+          ts = event.ts;
         }
       }
     }
@@ -205,7 +233,7 @@ Deno.serve(async (req) => {
       // *** THE CRITICAL FIX ***
       // Return 200 to Slack IMMEDIATELY, then process async.
       // EdgeRuntime.waitUntil keeps the function alive after the response is sent.
-      EdgeRuntime.waitUntil(captureThought(messageText, eventId));
+      EdgeRuntime.waitUntil(captureThought(messageText, eventId, channel, ts));
     }
   }
 
