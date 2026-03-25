@@ -1,0 +1,114 @@
+{
+  "name": "Open Brain — Daily Summary",
+  "description": "Runs every morning at 7am and calls the Supabase daily-summary edge function, which queries recent thoughts and sends a Slack digest.",
+  "nodes": [
+    {
+      "id": "schedule-trigger",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 7 * * *"
+            }
+          ]
+        }
+      },
+      "notes": "Fires every day at 7:00am. Adjust the cron expression to your preferred time (cron format: minute hour day month weekday)."
+    },
+    {
+      "id": "call-edge-function",
+      "name": "Call Daily Summary Edge Function",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [460, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://YOUR_SUPABASE_PROJECT_ID.supabase.co/functions/v1/daily-summary",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-access-key",
+              "value": "={{ $vars.OB1_ACCESS_KEY }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "notes": "Replace YOUR_SUPABASE_PROJECT_ID with your actual project ID. Store OB1_ACCESS_KEY as an n8n variable or credential."
+    },
+    {
+      "id": "check-response",
+      "name": "Check Result",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.sent }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ]
+        }
+      },
+      "notes": "Routes to success or no-op based on whether the edge function sent a Slack message."
+    },
+    {
+      "id": "log-success",
+      "name": "Log Success",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 200],
+      "notes": "Summary sent. thought_count is available in $json.thought_count if you want to log it."
+    },
+    {
+      "id": "log-no-thoughts",
+      "name": "No Thoughts — Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [900, 400],
+      "notes": "No thoughts were captured in the last 24 hours. Nothing sent to Slack."
+    }
+  ],
+  "connections": {
+    "schedule-trigger": {
+      "main": [
+        [{ "node": "call-edge-function", "type": "main", "index": 0 }]
+      ]
+    },
+    "call-edge-function": {
+      "main": [
+        [{ "node": "check-response", "type": "main", "index": 0 }]
+      ]
+    },
+    "check-response": {
+      "main": [
+        [{ "node": "log-success", "type": "main", "index": 0 }],
+        [{ "node": "log-no-thoughts", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "America/Chicago",
+    "saveManualExecutions": true,
+    "saveDataSuccessExecution": "last"
+  }
+}
