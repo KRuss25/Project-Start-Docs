@@ -145,19 +145,20 @@ async function captureThought(text: string, slackEventId: string): Promise<void>
 // --- HTTP handler ---
 Deno.serve(async (req) => {
   const body = await req.text();
-
-  // Verify Slack signature
-  if (!(await verifySlackSignature(req, body))) {
-    return new Response("Unauthorized", { status: 401 });
-  }
-
   const payload = JSON.parse(body);
 
-  // Slack URL verification challenge (one-time during app setup)
+  // Slack URL verification challenge (one-time during app setup).
+  // Handle BEFORE signature check — Slack sends this during initial URL setup
+  // and the signing secret may not yet be confirmed at that point.
   if (payload.type === "url_verification") {
     return new Response(JSON.stringify({ challenge: payload.challenge }), {
       headers: { "Content-Type": "application/json" },
     });
+  }
+
+  // Verify Slack signature for all other requests
+  if (!(await verifySlackSignature(req, body))) {
+    return new Response("Unauthorized", { status: 401 });
   }
 
   // Handle message events
