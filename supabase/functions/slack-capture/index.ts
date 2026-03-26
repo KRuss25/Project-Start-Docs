@@ -125,7 +125,7 @@ async function postSlackReply(channel: string, ts: string, userId: string, metad
   const topics: string[] = (metadata.topics as string[]) ?? [];
   const topicsStr = topics.length ? ` · ${topics.slice(0, 3).join(", ")}` : "";
 
-  await fetch("https://slack.com/api/chat.postEphemeral", {
+  const res = await fetch("https://slack.com/api/chat.postEphemeral", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${SLACK_BOT_TOKEN}`,
@@ -134,10 +134,13 @@ async function postSlackReply(channel: string, ts: string, userId: string, metad
     body: JSON.stringify({
       channel,
       user: userId,
-      thread_ts: ts,
       text: `🧠 Captured to Open Brain · *${type}*${topicsStr}`,
     }),
   });
+  const result = await res.json();
+  if (!result.ok) {
+    console.error("postEphemeral error:", result.error);
+  }
 }
 
 // --- Main capture logic (runs async after 200 is returned) ---
