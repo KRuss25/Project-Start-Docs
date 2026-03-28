@@ -14,23 +14,52 @@ const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");
 function classify(content: string): string {
   const text = content.toLowerCase();
 
-  // Skip — already done signals
-  const doneSignals = ["sent ", "finished ", "completed ", "updated ", "done ", "delivered ", "pushed ", "deployed ", "submitted "];
-  if (doneSignals.some((s) => text.includes(s))) return "done";
-
   // Skip — bot artifacts or very short
   if (text.includes("captured to open brain") || content.trim().length < 20) return "skip";
 
+  // Skip — historical logs (past tense, date stamping, "just wanted to log")
+  const historySignals = [
+    "just wanted to log", "wanted to log", "logging this", "for the record",
+    "on march ", "on april ", "on january ", "on february ", "on may ", "on june ",
+    "on july ", "on august ", "on september ", "on october ", "on november ", "on december ",
+    "today is march", "today is april", "today is january",
+    "i changed ", "i put ", "i moved ", "i added ", "i removed ", "i updated ",
+  ];
+  if (historySignals.some((s) => text.includes(s))) return "skip";
+
+  // Skip — already done signals
+  const doneSignals = [
+    "sent ", "finished ", "completed ", "updated ", "done ", "delivered ",
+    "pushed ", "deployed ", "submitted ", "finally sent", "just sent",
+  ];
+  if (doneSignals.some((s) => text.includes(s))) return "done";
+
   // Waiting on others
-  const waitingSignals = ["waiting", "awaiting", "should be getting", "haven't heard", "pending", "expecting", "supposed to", "to hear from", "from charlie", "from david", "from blake", "from pierce", "from tyler"];
+  const waitingSignals = [
+    "waiting", "awaiting", "should be getting", "haven't heard", "pending",
+    "expecting", "supposed to", "to hear from", "from charlie", "from david",
+    "from blake", "from pierce", "from tyler",
+  ];
   if (waitingSignals.some((s) => text.includes(s))) return "waiting";
 
-  // Time-sensitive — has a date or deadline
-  const dateSignals = ["april", "march", "monday", "tuesday", "wednesday", "thursday", "friday", "next week", "by the ", "deadline", "due ", "before ", " am", " pm", "this week", "week of"];
-  if (dateSignals.some((s) => text.includes(s))) return "time_sensitive";
+  // Time-sensitive — future dates and deadlines only
+  const futureDateSignals = [
+    "by april", "by may", "by june", "by the end of",
+    "next thursday", "next monday", "next tuesday", "next wednesday", "next friday",
+    "this thursday", "this monday", "this tuesday", "this wednesday", "this friday",
+    "before thursday", "before monday", "before friday",
+    "april 1", "april 7", "april 8", "april 14", "april 15", "april 17",
+    "week of the 30th", "week of march 30", "end of may",
+    "deadline", "due date",
+  ];
+  if (futureDateSignals.some((s) => text.includes(s))) return "time_sensitive";
 
   // Open task signals
-  const taskSignals = ["need to", "i need", "have to", "want to", "should ", "must ", "going to", "i want", "priority", "i have to", "follow up", "follow-up", "reach out", "get together", "work on", "build ", "make it"];
+  const taskSignals = [
+    "need to", "i need", "have to", "want to", "should ", "must ",
+    "going to", "i want", "priority", "i have to", "follow up", "follow-up",
+    "reach out", "get together", "work on", "build ", "make it",
+  ];
   if (taskSignals.some((s) => text.includes(s))) return "open_task";
 
   return "skip";
