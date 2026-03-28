@@ -1,5 +1,5 @@
 // Supabase Edge Function: daily-summary
-// Queries Open Brain thoughts from the last 24h and sends a Slack digest.
+// Sends a morning briefing to Slack organized by open loops, not raw log.
 // Deploy with: supabase functions deploy daily-summary
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -7,11 +7,36 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const SLACK_WEBHOOK_URL = Deno.env.get("SLACK_DAILY_SUMMARY_WEBHOOK")!;
-// Uses the same access key as your MCP server (stored as MCP_ACCESS_KEY in Supabase)
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");
 
+// --- Classify a thought into briefing sections ---
+// Returns one of: "waiting" | "open_task" | "time_sensitive" | "quick_win" | "done" | "skip"
+function classify(content: string): string {
+  const text = content.toLowerCase();
+
+  // Skip — already done signals
+  const doneSignals = ["sent ", "finished ", "completed ", "updated ", "done ", "delivered ", "pushed ", "deployed ", "submitted "];
+  if (doneSignals.some((s) => text.includes(s))) return "done";
+
+  // Skip — bot artifacts or very short
+  if (text.includes("captured to open brain") || content.trim().length < 20) return "skip";
+
+  // Waiting on others
+  const waitingSignals = ["waiting", "awaiting", "should be getting", "haven't heard", "pending", "expecting", "supposed to", "to hear from", "from charlie", "from david", "from blake", "from pierce", "from tyler"];
+  if (waitingSignals.some((s) => text.includes(s))) return "waiting";
+
+  // Time-sensitive — has a date or deadline
+  const dateSignals = ["april", "march", "monday", "tuesday", "wednesday", "thursday", "friday", "next week", "by the ", "deadline", "due ", "before ", " am", " pm", "this week", "week of"];
+  if (dateSignals.some((s) => text.includes(s))) return "time_sensitive";
+
+  // Open task signals
+  const taskSignals = ["need to", "i need", "have to", "want to", "should ", "must ", "going to", "i want", "priority", "i have to", "follow up", "follow-up", "reach out", "get together", "work on", "build ", "make it"];
+  if (taskSignals.some((s) => text.includes(s))) return "open_task";
+
+  return "skip";
+}
+
 Deno.serve(async (req) => {
-  // Simple key auth — called by your n8n cron job
   if (MCP_ACCESS_KEY) {
     const authHeader = req.headers.get("x-brain-key");
     if (authHeader !== MCP_ACCESS_KEY) {
@@ -21,13 +46,13 @@ Deno.serve(async (req) => {
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  // Pull thoughts captured in the last 24 hours
-  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  // Pull last 30 days for open loops, last 7 for quick wins
+  const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
   const { data: thoughts, error } = await supabase
     .from("thoughts")
     .select("content, created_at, metadata")
-    .gte("created_at", since)
+    .gte("created_at", since30)
     .order("created_at", { ascending: false });
 
   if (error) {
@@ -39,84 +64,95 @@ Deno.serve(async (req) => {
   }
 
   if (!thoughts || thoughts.length === 0) {
-    console.log("No thoughts in the last 24 hours — skipping.");
     return new Response(JSON.stringify({ sent: false, reason: "no_thoughts" }), {
       headers: { "Content-Type": "application/json" },
     });
   }
 
-  // Format the Slack message
-  // metadata is a JSONB field with shape:
-  // { type, topics: string[], people: string[], action_items: string[], source }
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  // Bucket thoughts into sections
+  const waiting: string[] = [];
+  const openTasks: string[] = [];
+  const timeSensitive: string[] = [];
+  const quickWins: string[] = [];
+
+  for (const t of thoughts) {
+    const bucket = classify(t.content);
+    const isRecent = new Date(t.created_at) >= sevenDaysAgo;
+    const line = `• ${t.content}`;
+
+    if (bucket === "waiting") waiting.push(line);
+    else if (bucket === "time_sensitive") timeSensitive.push(line);
+    else if (bucket === "open_task" && isRecent) quickWins.push(line);
+    else if (bucket === "open_task") openTasks.push(line);
+  }
+
+  // Skip sending if nothing actionable
+  const totalActionable = waiting.length + openTasks.length + timeSensitive.length + quickWins.length;
+  if (totalActionable === 0) {
+    console.log("Nothing actionable — skipping briefing.");
+    return new Response(JSON.stringify({ sent: false, reason: "nothing_actionable" }), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
   const dateLabel = new Date().toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
     day: "numeric",
   });
 
-  const thoughtLines = thoughts
-    .map((t) => {
-      const time = new Date(t.created_at).toLocaleTimeString("en-US", {
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      });
-      const meta = t.metadata ?? {};
-      const topics: string[] = meta.topics ?? [];
-      const type: string = meta.type ?? "";
-      const source: string = meta.source ?? "";
+  // Build Slack blocks
+  const blocks: unknown[] = [
+    {
+      type: "header",
+      text: {
+        type: "plain_text",
+        text: `🧠 Morning Briefing — ${dateLabel}`,
+        emoji: true,
+      },
+    },
+  ];
 
-      const topicsStr = topics.length ? ` _[${topics.slice(0, 3).join(", ")}]_` : "";
-      const typeStr = type ? ` *(${type})*` : "";
-      const sourceStr = source && source !== "mcp" ? ` — via ${source}` : "";
+  if (timeSensitive.length > 0) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `*⏰ Time-Sensitive*\n${timeSensitive.join("\n")}` },
+    });
+  }
 
-      return `• ${t.content}${typeStr}${topicsStr}${sourceStr} — ${time}`;
-    })
-    .join("\n");
+  if (waiting.length > 0) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `*👀 Waiting on Others*\n${waiting.join("\n")}` },
+    });
+  }
 
-  const slackPayload = {
-    blocks: [
-      {
-        type: "header",
-        text: {
-          type: "plain_text",
-          text: `🧠 Open Brain Daily Summary — ${dateLabel}`,
-          emoji: true,
-        },
-      },
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: `*${thoughts.length} thought${thoughts.length !== 1 ? "s" : ""} captured in the last 24 hours:*`,
-        },
-      },
-      {
-        type: "section",
-        text: {
-          type: "mrkdwn",
-          text: thoughtLines,
-        },
-      },
-      {
-        type: "divider",
-      },
-      {
-        type: "context",
-        elements: [
-          {
-            type: "mrkdwn",
-            text: "Sent by Open Brain · React with 🧠 on any Slack message to capture it",
-          },
-        ],
-      },
-    ],
-  };
+  if (quickWins.length > 0) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `*⚡ Quick Wins (this week)*\n${quickWins.join("\n")}` },
+    });
+  }
+
+  if (openTasks.length > 0) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: `*📋 Open Tasks*\n${openTasks.join("\n")}` },
+    });
+  }
+
+  blocks.push({ type: "divider" });
+  blocks.push({
+    type: "context",
+    elements: [{ type: "mrkdwn", text: "Sent by Open Brain · Capture thoughts in Slack with 🧠" }],
+  });
 
   const slackRes = await fetch(SLACK_WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(slackPayload),
+    body: JSON.stringify({ blocks }),
   });
 
   if (!slackRes.ok) {
@@ -129,7 +165,7 @@ Deno.serve(async (req) => {
   }
 
   return new Response(
-    JSON.stringify({ sent: true, thought_count: thoughts.length }),
+    JSON.stringify({ sent: true, sections: { time_sensitive: timeSensitive.length, waiting: waiting.length, quick_wins: quickWins.length, open_tasks: openTasks.length } }),
     { headers: { "Content-Type": "application/json" } }
   );
 });
