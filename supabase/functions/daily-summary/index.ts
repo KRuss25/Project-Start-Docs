@@ -147,6 +147,32 @@ Deno.serve(async (req) => {
 
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
+  // --- Build a set of keywords from completed thoughts ---
+  // Used to suppress open tasks that have already been completed.
+  // e.g. "Finished the open brain build" suppresses "finish this open brain build by the 19th"
+  const completedKeywords = new Set<string>();
+  const stopWords = new Set(["the", "this", "that", "with", "have", "want", "need", "also", "just", "for", "and", "but", "from", "will", "been"]);
+
+  for (const t of thoughts) {
+    if (classify(t.content) === "done") {
+      t.content.toLowerCase()
+        .split(/\s+/)
+        .filter((w) => w.length > 4 && !stopWords.has(w))
+        .forEach((w) => completedKeywords.add(w.replace(/[^a-z]/g, "")));
+    }
+  }
+
+  // Returns true if an open task is likely covered by a completion note
+  function isLikelyCompleted(content: string): boolean {
+    if (completedKeywords.size === 0) return false;
+    const words = content.toLowerCase()
+      .split(/\s+/)
+      .map((w) => w.replace(/[^a-z]/g, ""))
+      .filter((w) => w.length > 4 && !stopWords.has(w));
+    const matches = words.filter((w) => completedKeywords.has(w));
+    return matches.length >= 2;
+  }
+
   // Client buckets: keyed by client label
   const clientBuckets: Record<string, string[]> = {};
   for (const c of CLIENTS) clientBuckets[c.label] = [];
@@ -158,21 +184,49 @@ Deno.serve(async (req) => {
   const timeSensitive: string[] = [];
   const quickWins: string[] = [];
 
+  // Track content fingerprints to avoid showing the same topic twice
+  // (e.g. two different captures about Brand Voice forms)
+  const seenFingerprints = new Set<string>();
+
+  function fingerprint(content: string): string {
+    // Extract the 4 most significant words as a topic fingerprint
+    return content.toLowerCase()
+      .split(/\s+/)
+      .map((w) => w.replace(/[^a-z]/g, ""))
+      .filter((w) => w.length > 4 && !stopWords.has(w))
+      .slice(0, 4)
+      .sort()
+      .join("-");
+  }
+
+  function isDuplicate(content: string): boolean {
+    const fp = fingerprint(content);
+    if (seenFingerprints.has(fp)) return true;
+    seenFingerprints.add(fp);
+    return false;
+  }
+
   for (const t of thoughts) {
     const line = `• ${t.content}`;
+    const bucket = classify(t.content);
+
+    // Skip done, skipped, or likely-completed items
+    if (bucket === "skip" || bucket === "done") continue;
+    if (isLikelyCompleted(t.content)) continue;
+
     const client = matchClient(t.content);
 
-    // Client items go ONLY into the client section — not into general sections
+    // Client items go ONLY into the client section
     if (client) {
-      const bucket = classify(t.content);
-      if (bucket !== "skip" && bucket !== "done") {
+      if (!isDuplicate(t.content)) {
         clientBuckets[client.label].push(line);
       }
       continue;
     }
 
-    // Non-client items go into general sections
-    const bucket = classify(t.content);
+    // Non-client items go into general sections — skip if duplicate topic
+    if (isDuplicate(t.content)) continue;
+
     const isRecent = new Date(t.created_at) >= sevenDaysAgo;
 
     if (bucket === "event") events.push(line);
