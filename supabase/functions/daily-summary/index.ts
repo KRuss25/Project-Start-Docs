@@ -71,6 +71,8 @@ function classify(content: string): string {
   const doneSignals = [
     "sent ", "finished ", "completed ", "updated ", "done ", "delivered ",
     "pushed ", "deployed ", "submitted ", "finally sent", "just sent",
+    "received ", "approved ", "circled back", "got the ", "got a ",
+    "reviewed and", "signed off", "wrapped up", "closed out",
   ];
   if (doneSignals.some((s) => text.includes(s))) return "done";
 
@@ -162,6 +164,15 @@ Deno.serve(async (req) => {
     }
   }
 
+  // Fuzzy word overlap — matches "approve" against "approving", "review" against "reviewed" etc.
+  // Checks if the first 5 characters of both words match (simple stemming)
+  function wordsOverlap(a: string, b: string): boolean {
+    if (a === b) return true;
+    const minLen = 5;
+    if (a.length < minLen || b.length < minLen) return false;
+    return a.slice(0, minLen) === b.slice(0, minLen);
+  }
+
   // Returns true if an open task is likely covered by a completion note
   function isLikelyCompleted(content: string): boolean {
     if (completedKeywords.size === 0) return false;
@@ -169,7 +180,10 @@ Deno.serve(async (req) => {
       .split(/\s+/)
       .map((w) => w.replace(/[^a-z]/g, ""))
       .filter((w) => w.length > 4 && !stopWords.has(w));
-    const matches = words.filter((w) => completedKeywords.has(w));
+    const completedArr = Array.from(completedKeywords);
+    const matches = words.filter((w) =>
+      completedArr.some((ck) => wordsOverlap(w, ck))
+    );
     return matches.length >= 2;
   }
 
