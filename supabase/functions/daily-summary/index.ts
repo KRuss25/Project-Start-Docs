@@ -76,11 +76,19 @@ function classify(content: string): string {
   ];
   if (doneSignals.some((s) => text.includes(s))) return "done";
 
+  // Urgent — explicit "first thing", "must do today" type signals → time_sensitive
+  const urgentSignals = [
+    "very first thing", "first thing i", "first priority", "must be today",
+    "do today", "must do", "urgent",
+  ];
+  if (urgentSignals.some((s) => text.includes(s))) return "time_sensitive";
+
   // Upcoming events — conferences, speaking, master sessions, prospect meetings
   const eventSignals = [
-    "conference", "public speaking", "speaking event", "presentation",
+    "conference", "public speaking", "speaking event", "speaking on",
     "master session", "discovery call", "prospect meeting", "new client meeting",
-    "clemson", "greenville", "outreach around", "april 8",
+    "clemson", "vistage", "leaving on the", "headed to",
+    "april 7", "april 8", "april 9",
   ];
   if (eventSignals.some((s) => text.includes(s))) return "event";
 
@@ -98,8 +106,9 @@ function classify(content: string): string {
     "next thursday", "next monday", "next tuesday", "next wednesday", "next friday",
     "this thursday", "this monday", "this tuesday", "this wednesday", "this friday",
     "before thursday", "before monday", "before friday",
-    "april 1", "april 7", "april 8", "april 14", "april 15", "april 17",
-    "week of the 30th", "week of march 30", "end of may",
+    "april 6", "april 7", "april 8", "april 9", "april 10",
+    "april 13", "april 14", "april 15", "april 17",
+    "week of april", "week of the 30th", "end of may",
     "deadline", "due date",
   ];
   if (futureDateSignals.some((s) => text.includes(s))) return "time_sensitive";
@@ -126,6 +135,7 @@ Deno.serve(async (req) => {
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
   const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
 
   const { data: thoughts, error } = await supabase
     .from("thoughts")
@@ -223,10 +233,16 @@ Deno.serve(async (req) => {
   for (const t of thoughts) {
     const line = `• ${t.content}`;
     const bucket = classify(t.content);
+    const capturedAt = new Date(t.created_at);
+    const isRecent = capturedAt >= sevenDaysAgo;
+    const isVeryOld = capturedAt < tenDaysAgo;
 
     // Skip done, skipped, or likely-completed items
     if (bucket === "skip" || bucket === "done") continue;
     if (isLikelyCompleted(t.content)) continue;
+
+    // Drop stale waiting items (older than 10 days) — "this week" from 2 weeks ago is noise
+    if (bucket === "waiting" && isVeryOld) continue;
 
     const client = matchClient(t.content);
 
@@ -238,10 +254,8 @@ Deno.serve(async (req) => {
       continue;
     }
 
-    // Non-client items go into general sections — skip if duplicate topic
+    // Non-client items — skip if duplicate topic
     if (isDuplicate(t.content)) continue;
-
-    const isRecent = new Date(t.created_at) >= sevenDaysAgo;
 
     if (bucket === "event") events.push(line);
     else if (bucket === "waiting") waiting.push(line);
