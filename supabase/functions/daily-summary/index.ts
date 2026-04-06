@@ -88,7 +88,6 @@ function classify(content: string): string {
     "conference", "public speaking", "speaking event", "speaking on",
     "master session", "discovery call", "prospect meeting", "new client meeting",
     "clemson", "vistage", "leaving on the", "headed to",
-    "april 7", "april 8", "april 9",
   ];
   if (eventSignals.some((s) => text.includes(s))) return "event";
 
@@ -100,18 +99,23 @@ function classify(content: string): string {
   ];
   if (waitingSignals.some((s) => text.includes(s))) return "waiting";
 
-  // Time-sensitive — future dates and deadlines only
-  const futureDateSignals = [
-    "by april", "by may", "by june", "by the end of",
-    "next thursday", "next monday", "next tuesday", "next wednesday", "next friday",
+  // Time-sensitive — detect any future date pattern automatically (no monthly maintenance needed)
+  const staticDateSignals = [
+    "by the end of", "next thursday", "next monday", "next tuesday", "next wednesday", "next friday",
     "this thursday", "this monday", "this tuesday", "this wednesday", "this friday",
     "before thursday", "before monday", "before friday",
-    "april 6", "april 7", "april 8", "april 9", "april 10",
-    "april 13", "april 14", "april 15", "april 17",
-    "week of april", "week of the 30th", "end of may",
+    "week of april", "week of may", "week of june",
+    "end of may", "end of april", "end of june",
     "deadline", "due date",
   ];
-  if (futureDateSignals.some((s) => text.includes(s))) return "time_sensitive";
+  if (staticDateSignals.some((s) => text.includes(s))) return "time_sensitive";
+
+  // Detect "by [month]", "[month] [1-31]", "the [1-31]st/nd/rd/th" patterns
+  const monthPattern = /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b/;
+  const byMonthPattern = /\bby\s+(january|february|march|april|may|june|july|august|september|october|november|december)\b/;
+  const ordinalPattern = /\bthe\s+\d{1,2}(st|nd|rd|th)\b/;
+  const weekOfPattern = /\bweek of\b/;
+  if (monthPattern.test(text) || byMonthPattern.test(text) || ordinalPattern.test(text) || weekOfPattern.test(text)) return "time_sensitive";
 
   // Open task
   const taskSignals = [
