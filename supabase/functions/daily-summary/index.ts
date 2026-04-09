@@ -1,5 +1,8 @@
 // Supabase Edge Function: daily-summary
 // Morning briefing with active client sections, upcoming events, and open loops.
+// v7: LLM-based classification via OpenRouter for context-aware, intelligent categorization.
+//     Replaces keyword matching — understands past tense, stale dates, false positives.
+// Requires: OPENROUTER_API_KEY (already set for slack-capture — shared across all functions)
 // Deploy with: supabase functions deploy daily-summary
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -8,6 +11,7 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const SLACK_WEBHOOK_URL = Deno.env.get("SLACK_DAILY_SUMMARY_WEBHOOK")!;
 const MCP_ACCESS_KEY = Deno.env.get("MCP_ACCESS_KEY");
+const OPENROUTER_API_KEY = Deno.env.get("OPENROUTER_API_KEY")!;
 
 // --- Active client definitions ---
 // Add new clients here as they come on board.
@@ -40,7 +44,6 @@ const CLIENTS = [
 ];
 
 // --- Check if a thought mentions a known client ---
-// Returns the client object or null
 function matchClient(content: string): typeof CLIENTS[0] | null {
   const text = content.toLowerCase();
   for (const client of CLIENTS) {
@@ -49,83 +52,115 @@ function matchClient(content: string): typeof CLIENTS[0] | null {
   return null;
 }
 
-// --- Classify a thought into briefing sections ---
-// Returns one of: "event" | "waiting" | "open_task" | "time_sensitive" | "done" | "skip"
-function classify(content: string): string {
-  const text = content.toLowerCase();
-
-  // Skip — bot artifacts or very short
-  if (text.includes("captured to open brain") || content.trim().length < 20) return "skip";
-
-  // Skip — historical logs
-  const historySignals = [
+// --- Fast pre-filter: skip obvious non-actionable items before the LLM call ---
+// Reduces token cost — these are unambiguously not actionable.
+function isObviousSkip(content: string): boolean {
+  const text = content.toLowerCase().trim();
+  if (text.includes("captured to open brain")) return true;
+  if (content.trim().length < 20) return true;
+  const signals = [
     "just wanted to log", "wanted to log", "logging this", "for the record",
-    "on march ", "on april ", "on january ", "on february ", "on may ", "on june ",
-    "on july ", "on august ", "on september ", "on october ", "on november ", "on december ",
-    "today is march", "today is april", "today is january",
-    "i changed ", "i put ", "i moved ", "i added ", "i removed ", "i updated ",
+    "today is march", "today is april", "today is january", "today is february",
+    "today is may", "today is june", "today is july", "today is august",
+    "today is september", "today is october", "today is november", "today is december",
   ];
-  if (historySignals.some((s) => text.includes(s))) return "skip";
+  return signals.some((s) => text.includes(s));
+}
 
-  // Skip — already done
-  const doneSignals = [
-    "sent ", "finished ", "completed ", "updated ", "done ", "delivered ",
-    "pushed ", "deployed ", "submitted ", "finally sent", "just sent",
-    "received ", "approved ", "circled back", "got the ", "got a ",
-    "reviewed and", "signed off", "wrapped up", "closed out",
-  ];
-  if (doneSignals.some((s) => text.includes(s))) return "done";
+// --- LLM batch classification ---
+// Sends all candidate thoughts to gpt-4o-mini in a single call.
+// Returns a map from array index → category.
+type Category = "event" | "time_sensitive" | "waiting" | "open_task" | "done" | "skip";
 
-  // Urgent — explicit "first thing", "must do today" type signals → time_sensitive
-  const urgentSignals = [
-    "very first thing", "first thing i", "first priority", "must be today",
-    "do today", "must do", "urgent",
-  ];
-  if (urgentSignals.some((s) => text.includes(s))) return "time_sensitive";
+async function batchClassify(
+  items: Array<{ content: string; created_at: string }>,
+  todayISO: string,
+  todayHuman: string,
+): Promise<Map<number, Category>> {
+  const resultMap = new Map<number, Category>();
+  if (items.length === 0) return resultMap;
 
-  // Upcoming events — conferences, speaking, master sessions, prospect meetings
-  const eventSignals = [
-    "conference", "public speaking", "speaking event", "speaking on",
-    "master session", "discovery call", "prospect meeting", "new client meeting",
-    "clemson", "vistage", "leaving on the", "headed to",
-  ];
-  if (eventSignals.some((s) => text.includes(s))) return "event";
+  // Include capture date so the LLM can identify stale items
+  const itemList = items
+    .map((t, i) => {
+      const date = t.created_at.split("T")[0]; // YYYY-MM-DD
+      return `[${i}] (captured ${date}) ${t.content}`;
+    })
+    .join("\n");
 
-  // Waiting on others
-  const waitingSignals = [
-    "waiting", "awaiting", "should be getting", "haven't heard", "pending",
-    "expecting", "supposed to", "to hear from", "from charlie", "from david",
-    "from blake", "from pierce", "from tyler",
-  ];
-  if (waitingSignals.some((s) => text.includes(s))) return "waiting";
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      model: "openai/gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `Today is ${todayISO} (${todayHuman}). Classify each captured thought for a professional morning briefing.
 
-  // Time-sensitive — detect any future date pattern automatically (no monthly maintenance needed)
-  const staticDateSignals = [
-    "by the end of", "next thursday", "next monday", "next tuesday", "next wednesday", "next friday",
-    "this thursday", "this monday", "this tuesday", "this wednesday", "this friday",
-    "before thursday", "before monday", "before friday",
-    "week of april", "week of may", "week of june",
-    "end of may", "end of april", "end of june",
-    "deadline", "due date",
-  ];
-  if (staticDateSignals.some((s) => text.includes(s))) return "time_sensitive";
+Choose exactly ONE category per thought:
+• "event" — a future meeting, conference, travel, or speaking engagement the speaker will attend in person
+• "time_sensitive" — has a specific future deadline or upcoming date that has NOT yet passed
+• "waiting" — the speaker is waiting on another person's action or response
+• "open_task" — something the speaker still needs to do (no specific future date)
+• "done" — completed, historical, past-tense action, or contains a deadline/date that is BEFORE ${todayISO}
+• "skip" — too vague, purely conversational, or not actionable
 
-  // Detect "by [month]", "[month] [1-31]", "the [1-31]st/nd/rd/th" patterns
-  const monthPattern = /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}\b/;
-  const byMonthPattern = /\bby\s+(january|february|march|april|may|june|july|august|september|october|november|december)\b/;
-  const ordinalPattern = /\bthe\s+\d{1,2}(st|nd|rd|th)\b/;
-  const weekOfPattern = /\bweek of\b/;
-  if (monthPattern.test(text) || byMonthPattern.test(text) || ordinalPattern.test(text) || weekOfPattern.test(text)) return "time_sensitive";
+Decision rules (apply in order):
+1. Any deadline, week, or specific date mentioned that is before ${todayISO} → "done" (it is stale, do not show it)
+2. Past-tense verbs (generated, sent, finished, received, approved, created, completed, updated, deployed, wrapped up, delivered, submitted) → "done"
+3. Mentioning a place name or university (like Clemson, Charlotte, Raleigh) does NOT make it an "event" — only classify as "event" if the speaker clearly states they are attending or traveling there for something upcoming
+4. A thought captured more than 14 days ago with no future date and no clear urgency → "skip"
+5. When uncertain between "open_task" and "done", lean toward "done" if the language suggests the task may already be handled
 
-  // Open task
-  const taskSignals = [
-    "need to", "i need", "have to", "want to", "should ", "must ",
-    "going to", "i want", "priority", "i have to", "follow up", "follow-up",
-    "reach out", "get together", "work on", "build ", "make it",
-  ];
-  if (taskSignals.some((s) => text.includes(s))) return "open_task";
+Return ONLY valid JSON, no other text:
+{"results": [{"index": 0, "category": "open_task"}, {"index": 1, "category": "done"}, ...]}`,
+        },
+        { role: "user", content: itemList },
+      ],
+      response_format: { type: "json_object" },
+    }),
+  });
 
-  return "skip";
+  if (!res.ok) {
+    console.error("OpenRouter classification error:", res.status, await res.text());
+    return resultMap; // empty map → all items treated as "skip" (safe fallback)
+  }
+
+  const data = await res.json();
+  try {
+    const parsed = JSON.parse(data.choices[0].message.content);
+    for (const item of (parsed.results ?? [])) {
+      if (typeof item.index === "number" && typeof item.category === "string") {
+        resultMap.set(item.index, item.category as Category);
+      }
+    }
+  } catch (e) {
+    console.error("LLM parse error:", e, JSON.stringify(data).slice(0, 500));
+  }
+
+  return resultMap;
+}
+
+// --- Topic fingerprint for deduplication ---
+// Extracts the 5 most significant words as a topic fingerprint.
+const stopWords = new Set([
+  "the", "this", "that", "with", "have", "want", "need", "also", "just",
+  "for", "and", "but", "from", "will", "been", "about", "some", "very",
+]);
+
+function fingerprint(content: string): string {
+  return content
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z]/g, ""))
+    .filter((w) => w.length > 4 && !stopWords.has(w))
+    .slice(0, 5)
+    .sort()
+    .join("-");
 }
 
 Deno.serve(async (req) => {
@@ -139,7 +174,6 @@ Deno.serve(async (req) => {
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
   const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
 
   const { data: thoughts, error } = await supabase
     .from("thoughts")
@@ -161,71 +195,32 @@ Deno.serve(async (req) => {
     });
   }
 
-  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+  // Pre-filter obvious skips to reduce LLM token cost
+  const candidates = thoughts.filter((t) => !isObviousSkip(t.content));
 
-  // --- Build a set of keywords from completed thoughts ---
-  // Used to suppress open tasks that have already been completed.
-  // e.g. "Finished the open brain build" suppresses "finish this open brain build by the 19th"
-  const completedKeywords = new Set<string>();
-  const stopWords = new Set(["the", "this", "that", "with", "have", "want", "need", "also", "just", "for", "and", "but", "from", "will", "been"]);
+  // Date strings for LLM prompt
+  const now = new Date();
+  const todayISO = now.toLocaleDateString("en-CA", { timeZone: "America/New_York" }); // YYYY-MM-DD
+  const todayHuman = now.toLocaleDateString("en-US", {
+    weekday: "long", month: "long", day: "numeric", year: "numeric",
+    timeZone: "America/New_York",
+  });
 
-  for (const t of thoughts) {
-    if (classify(t.content) === "done") {
-      t.content.toLowerCase()
-        .split(/\s+/)
-        .filter((w) => w.length > 4 && !stopWords.has(w))
-        .forEach((w) => completedKeywords.add(w.replace(/[^a-z]/g, "")));
-    }
-  }
+  // LLM classify all candidates in a single API call
+  const classifications = await batchClassify(candidates, todayISO, todayHuman);
 
-  // Fuzzy word overlap — matches "approve" against "approving", "review" against "reviewed" etc.
-  // Checks if the first 5 characters of both words match (simple stemming)
-  function wordsOverlap(a: string, b: string): boolean {
-    if (a === b) return true;
-    const minLen = 5;
-    if (a.length < minLen || b.length < minLen) return false;
-    return a.slice(0, minLen) === b.slice(0, minLen);
-  }
-
-  // Returns true if an open task is likely covered by a completion note
-  function isLikelyCompleted(content: string): boolean {
-    if (completedKeywords.size === 0) return false;
-    const words = content.toLowerCase()
-      .split(/\s+/)
-      .map((w) => w.replace(/[^a-z]/g, ""))
-      .filter((w) => w.length > 4 && !stopWords.has(w));
-    const completedArr = Array.from(completedKeywords);
-    const matches = words.filter((w) =>
-      completedArr.some((ck) => wordsOverlap(w, ck))
-    );
-    return matches.length >= 2;
-  }
-
-  // Client buckets: keyed by client label
+  // --- Build output buckets ---
   const clientBuckets: Record<string, string[]> = {};
   for (const c of CLIENTS) clientBuckets[c.label] = [];
 
-  // General section buckets
   const events: string[] = [];
   const waiting: string[] = [];
   const openTasks: string[] = [];
   const timeSensitive: string[] = [];
   const quickWins: string[] = [];
 
-  // Track content fingerprints to avoid showing the same topic twice
-  // (e.g. two different captures about Brand Voice forms)
+  const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const seenFingerprints = new Set<string>();
-
-  function fingerprint(content: string): string {
-    // Extract the 4 most significant words as a topic fingerprint
-    return content.toLowerCase()
-      .split(/\s+/)
-      .map((w) => w.replace(/[^a-z]/g, ""))
-      .filter((w) => w.length > 4 && !stopWords.has(w))
-      .slice(0, 4)
-      .sort()
-      .join("-");
-  }
 
   function isDuplicate(content: string): boolean {
     const fp = fingerprint(content);
@@ -234,41 +229,32 @@ Deno.serve(async (req) => {
     return false;
   }
 
-  for (const t of thoughts) {
+  for (let i = 0; i < candidates.length; i++) {
+    const t = candidates[i];
+    const category = classifications.get(i) ?? "skip";
+    if (category === "skip" || category === "done") continue;
+
     const line = `• ${t.content}`;
-    const bucket = classify(t.content);
     const capturedAt = new Date(t.created_at);
     const isRecent = capturedAt >= sevenDaysAgo;
-    const isVeryOld = capturedAt < tenDaysAgo;
-
-    // Skip done, skipped, or likely-completed items
-    if (bucket === "skip" || bucket === "done") continue;
-    if (isLikelyCompleted(t.content)) continue;
-
-    // Drop stale waiting items (older than 10 days) — "this week" from 2 weeks ago is noise
-    if (bucket === "waiting" && isVeryOld) continue;
-
     const client = matchClient(t.content);
 
-    // Client items go ONLY into the client section
+    // Client items go ONLY into the client section (never in general sections)
     if (client) {
-      if (!isDuplicate(t.content)) {
-        clientBuckets[client.label].push(line);
-      }
+      if (!isDuplicate(t.content)) clientBuckets[client.label].push(line);
       continue;
     }
 
-    // Non-client items — skip if duplicate topic
     if (isDuplicate(t.content)) continue;
 
-    if (bucket === "event") events.push(line);
-    else if (bucket === "waiting") waiting.push(line);
-    else if (bucket === "time_sensitive") timeSensitive.push(line);
-    else if (bucket === "open_task" && isRecent) quickWins.push(line);
-    else if (bucket === "open_task") openTasks.push(line);
+    if (category === "event") events.push(line);
+    else if (category === "waiting") waiting.push(line);
+    else if (category === "time_sensitive") timeSensitive.push(line);
+    else if (category === "open_task" && isRecent) quickWins.push(line);
+    else if (category === "open_task") openTasks.push(line);
   }
 
-  // Check if there's anything to send
+  // Nothing actionable to send?
   const hasClients = CLIENTS.some((c) => clientBuckets[c.label].length > 0);
   const totalActionable = events.length + waiting.length + openTasks.length + timeSensitive.length + quickWins.length;
   if (!hasClients && totalActionable === 0) {
@@ -278,14 +264,12 @@ Deno.serve(async (req) => {
     });
   }
 
-  const dateLabel = new Date().toLocaleDateString("en-US", {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
+  const dateLabel = now.toLocaleDateString("en-US", {
+    weekday: "long", month: "long", day: "numeric",
     timeZone: "America/New_York",
   });
 
-  // Build Slack blocks
+  // --- Build Slack blocks ---
   const blocks: unknown[] = [
     {
       type: "header",
@@ -293,7 +277,7 @@ Deno.serve(async (req) => {
     },
   ];
 
-  // --- Active Clients section ---
+  // Active Clients section
   const activeClientLines: string[] = [];
   for (const client of CLIENTS) {
     const items = clientBuckets[client.label];
@@ -311,7 +295,6 @@ Deno.serve(async (req) => {
     blocks.push({ type: "divider" });
   }
 
-  // --- Upcoming Events ---
   if (events.length > 0) {
     blocks.push({
       type: "section",
@@ -319,7 +302,6 @@ Deno.serve(async (req) => {
     });
   }
 
-  // --- General sections ---
   if (timeSensitive.length > 0) {
     blocks.push({
       type: "section",
@@ -371,6 +353,6 @@ Deno.serve(async (req) => {
 
   return new Response(
     JSON.stringify({ sent: true }),
-    { headers: { "Content-Type": "application/json" } }
+    { headers: { "Content-Type": "application/json" } },
   );
 });
