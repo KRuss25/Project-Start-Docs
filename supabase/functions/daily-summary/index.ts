@@ -232,18 +232,18 @@ Deno.serve(async (req) => {
     });
   }
 
-  // Pre-filter obvious skips and clear completions to reduce LLM token cost
-  const candidates = thoughts.filter(
-    (t) => !isObviousSkip(t.content) && !isObviousDone(t.content, todayISO)
-  );
-
-  // Date strings for LLM prompt
+  // Date strings — must be defined before candidates filter and LLM call
   const now = new Date();
   const todayISO = now.toLocaleDateString("en-CA", { timeZone: "America/New_York" }); // YYYY-MM-DD
   const todayHuman = now.toLocaleDateString("en-US", {
     weekday: "long", month: "long", day: "numeric", year: "numeric",
     timeZone: "America/New_York",
   });
+
+  // Pre-filter obvious skips and clear completions to reduce LLM token cost
+  const candidates = thoughts.filter(
+    (t) => !isObviousSkip(t.content) && !isObviousDone(t.content, todayISO)
+  );
 
   // LLM classify all candidates in a single API call
   const classifications = await batchClassify(candidates, todayISO, todayHuman);
