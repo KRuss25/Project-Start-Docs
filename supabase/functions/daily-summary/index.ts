@@ -189,12 +189,12 @@ Deno.serve(async (req) => {
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-  const since30 = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const since14 = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
 
   const { data: thoughts, error } = await supabase
     .from("thoughts")
     .select("content, created_at, metadata")
-    .gte("created_at", since30)
+    .gte("created_at", since14)
     .order("created_at", { ascending: false });
 
   if (error) {
