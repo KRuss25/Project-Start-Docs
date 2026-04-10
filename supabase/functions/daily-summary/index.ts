@@ -67,70 +67,15 @@ function isObviousSkip(content: string): boolean {
   return signals.some((s) => text.includes(s));
 }
 
-// --- Fast pre-classifier: catch obvious "done" items before LLM ---
-function isObviousDone(content: string, todayISO: string): boolean {
+// --- Fast pre-classifier: catch unambiguous completions before LLM ---
+// Only catches things that are 100% clearly done — no edge cases.
+function isObviousDone(content: string): boolean {
   const text = content.toLowerCase().trim();
-
-  // Past-tense verb at the START of the thought → clearly already happened
-  const pastTenseStarts = [
-    "generated ", "sent ", "finished ", "completed ", "received ", "approved ",
-    "created ", "deployed ", "delivered ", "submitted ", "wrapped up", "signed ",
-    "published ", "launched ", "uploaded ", "updated ", "reviewed ", "closed ",
-    "i met ", "met with ", "i had ", "i spoke ", "i called ", "i talked ", "i attended ",
+  const clearPastTense = [
+    "sent ", "finished ", "completed ", "received ", "deployed ",
+    "delivered ", "submitted ", "signed ", "published ", "launched ",
   ];
-  if (pastTenseStarts.some((s) => text.startsWith(s))) return true;
-
-  const monthNames = [
-    "january","february","march","april","may","june",
-    "july","august","september","october","november","december",
-  ];
-
-  // Specific "Month Day" dates that are already in the past (e.g., "April 8th", "on April 9")
-  const specificDateMatch = text.match(
-    /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?\b/
-  );
-  if (specificDateMatch) {
-    const monthIdx = monthNames.indexOf(specificDateMatch[1]);
-    if (monthIdx !== -1) {
-      const year = new Date().getFullYear();
-      const dateStr = `${year}-${String(monthIdx + 1).padStart(2, "0")}-${String(parseInt(specificDateMatch[2])).padStart(2, "0")}`;
-      if (dateStr < todayISO) return true;
-    }
-  }
-
-  // "Week of [month] [day]" where that week has fully ended
-  const weekOfMatch = text.match(
-    /\bweek of (january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/
-  );
-  if (weekOfMatch) {
-    const monthIdx = monthNames.indexOf(weekOfMatch[1]);
-    if (monthIdx !== -1) {
-      const year = new Date().getFullYear();
-      const weekStart = new Date(year, monthIdx, parseInt(weekOfMatch[2]));
-      const weekEnd = new Date(weekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
-      if (weekEnd.toISOString().split("T")[0] < todayISO) return true;
-    }
-  }
-
-  return false;
-}
-
-// --- Hard age cutoff: drop old items with no future deadline signal ---
-// Items older than 10 days are dropped in code — not left to LLM judgment.
-// Exception: items that reference a future month or deadline keyword are kept.
-function isTooOldToSurface(content: string, capturedAt: Date, tenDaysAgo: Date): boolean {
-  if (capturedAt >= tenDaysAgo) return false; // recent → always pass through
-
-  const text = content.toLowerCase();
-
-  // Keep if references a future month (May onward — April is mostly past by mid-month)
-  const futureMonths = ["may", "june", "july", "august", "september", "october", "november", "december"];
-  if (futureMonths.some((m) => text.includes(m))) return false;
-
-  // Keep if has a deadline signal
-  if (text.includes("end of") || text.includes("by the end") || text.includes("deadline")) return false;
-
-  return true; // old with no future signals → drop
+  return clearPastTense.some((s) => text.startsWith(s));
 }
 
 // --- LLM batch classification ---
@@ -165,26 +110,28 @@ async function batchClassify(
       messages: [
         {
           role: "system",
-          content: `Today is ${todayISO} (${todayHuman}). Classify each captured thought for a professional morning briefing. Be selective — only surface what genuinely needs attention today.
+          content: `You are preparing a focused morning briefing for a busy entrepreneur. Today is ${todayHuman} (${todayISO}).
 
-Choose exactly ONE category per thought:
-• "event" — a future meeting, conference, travel, or speaking engagement the speaker will attend in person
-• "time_sensitive" — has a specific future deadline or upcoming date that has NOT yet passed
-• "waiting" — the speaker is waiting on another person's action or response
-• "open_task" — something the speaker still needs to do, captured within the last 10 days
-• "done" — completed, historical, past-tense action, or contains a deadline/date BEFORE ${todayISO}
-• "skip" — too vague, conversational, not actionable, or too old to be relevant
+Each thought shows the date it was captured. Use that to judge freshness and relevance.
 
-Decision rules (apply in order):
-1. Any deadline, week, or specific date mentioned that is before ${todayISO} → "done"
-2. Past-tense verbs at the START of a thought (generated, sent, finished, received, approved, created, deployed, delivered, submitted) → "done"
-3. Planning phrases like "prep for", "put together", "need to", "want to", "reach out", "follow up" always indicate an open task — never classify these as "done"
-4. Mentioning a place name (Clemson, Charlotte, Raleigh) does NOT make it an "event" — only use "event" if the speaker clearly states they are attending or traveling somewhere upcoming
-5. Captured more than 10 days ago AND no specific future date mentioned → "skip" (it is stale background noise)
-6. When uncertain, lean toward "skip" — a clean briefing is more useful than an overwhelming one
+Classify each as one of:
+- "event": a future meeting, trip, or speaking engagement the person will attend
+- "time_sensitive": has a specific upcoming deadline that hasn't passed yet
+- "waiting": person is waiting on someone else's response or action
+- "open_task": something they still need to do
+- "done": already completed, past tense, or the referenced date has passed
+- "skip": not actionable for today's briefing
 
-Return ONLY valid JSON, no other text:
-{"results": [{"index": 0, "category": "open_task"}, {"index": 1, "category": "done"}, ...]}`,
+Use your judgment like a smart assistant who knows this person's schedule:
+- Past tense language (met with, sent, finished, received, approved, generated, created) → done
+- Dates or weeks that have already passed → done
+- A place name alone (Clemson, Charlotte) is not an event — only flag as event if they're clearly attending something upcoming
+- Thoughts captured 2+ weeks ago with no future date or deadline → skip (they're background noise)
+- Recent captures (last 7 days) with clear action language → open_task or waiting
+- Aim for a tight, useful briefing. When genuinely uncertain, lean toward skip.
+
+Return ONLY this JSON:
+{"results": [{"index": 0, "category": "open_task"}, ...]}`,
         },
         { role: "user", content: itemList },
       ],
@@ -272,16 +219,10 @@ Deno.serve(async (req) => {
     timeZone: "America/New_York",
   });
 
-  const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
-
-  // Pre-filter: remove obvious skips, obvious completions, and stale items in code
-  // — not left to LLM judgment, which is inconsistent
-  const candidates = thoughts.filter((t) => {
-    if (isObviousSkip(t.content)) return false;
-    if (isObviousDone(t.content, todayISO)) return false;
-    if (isTooOldToSurface(t.content, new Date(t.created_at), tenDaysAgo)) return false;
-    return true;
-  });
+  // Pre-filter only the unambiguous non-actionable items before LLM
+  const candidates = thoughts.filter(
+    (t) => !isObviousSkip(t.content) && !isObviousDone(t.content)
+  );
 
   // LLM classify all candidates in a single API call
   const classifications = await batchClassify(candidates, todayISO, todayHuman);
