@@ -68,7 +68,6 @@ function isObviousSkip(content: string): boolean {
 }
 
 // --- Fast pre-classifier: catch obvious "done" items before LLM ---
-// These are unambiguously completed — no need to spend tokens on them.
 function isObviousDone(content: string, todayISO: string): boolean {
   const text = content.toLowerCase().trim();
 
@@ -77,18 +76,33 @@ function isObviousDone(content: string, todayISO: string): boolean {
     "generated ", "sent ", "finished ", "completed ", "received ", "approved ",
     "created ", "deployed ", "delivered ", "submitted ", "wrapped up", "signed ",
     "published ", "launched ", "uploaded ", "updated ", "reviewed ", "closed ",
+    "i met ", "met with ", "i had ", "i spoke ", "i called ", "i talked ", "i attended ",
   ];
   if (pastTenseStarts.some((s) => text.startsWith(s))) return true;
 
-  // "Week of [month] [day]" where that week has fully ended (>7 days past the start date)
+  const monthNames = [
+    "january","february","march","april","may","june",
+    "july","august","september","october","november","december",
+  ];
+
+  // Specific "Month Day" dates that are already in the past (e.g., "April 8th", "on April 9")
+  const specificDateMatch = text.match(
+    /\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?\b/
+  );
+  if (specificDateMatch) {
+    const monthIdx = monthNames.indexOf(specificDateMatch[1]);
+    if (monthIdx !== -1) {
+      const year = new Date().getFullYear();
+      const dateStr = `${year}-${String(monthIdx + 1).padStart(2, "0")}-${String(parseInt(specificDateMatch[2])).padStart(2, "0")}`;
+      if (dateStr < todayISO) return true;
+    }
+  }
+
+  // "Week of [month] [day]" where that week has fully ended
   const weekOfMatch = text.match(
     /\bweek of (january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/
   );
   if (weekOfMatch) {
-    const monthNames = [
-      "january","february","march","april","may","june",
-      "july","august","september","october","november","december",
-    ];
     const monthIdx = monthNames.indexOf(weekOfMatch[1]);
     if (monthIdx !== -1) {
       const year = new Date().getFullYear();
@@ -99,6 +113,24 @@ function isObviousDone(content: string, todayISO: string): boolean {
   }
 
   return false;
+}
+
+// --- Hard age cutoff: drop old items with no future deadline signal ---
+// Items older than 10 days are dropped in code — not left to LLM judgment.
+// Exception: items that reference a future month or deadline keyword are kept.
+function isTooOldToSurface(content: string, capturedAt: Date, tenDaysAgo: Date): boolean {
+  if (capturedAt >= tenDaysAgo) return false; // recent → always pass through
+
+  const text = content.toLowerCase();
+
+  // Keep if references a future month (May onward — April is mostly past by mid-month)
+  const futureMonths = ["may", "june", "july", "august", "september", "october", "november", "december"];
+  if (futureMonths.some((m) => text.includes(m))) return false;
+
+  // Keep if has a deadline signal
+  if (text.includes("end of") || text.includes("by the end") || text.includes("deadline")) return false;
+
+  return true; // old with no future signals → drop
 }
 
 // --- LLM batch classification ---
@@ -240,10 +272,16 @@ Deno.serve(async (req) => {
     timeZone: "America/New_York",
   });
 
-  // Pre-filter obvious skips and clear completions to reduce LLM token cost
-  const candidates = thoughts.filter(
-    (t) => !isObviousSkip(t.content) && !isObviousDone(t.content, todayISO)
-  );
+  const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000);
+
+  // Pre-filter: remove obvious skips, obvious completions, and stale items in code
+  // — not left to LLM judgment, which is inconsistent
+  const candidates = thoughts.filter((t) => {
+    if (isObviousSkip(t.content)) return false;
+    if (isObviousDone(t.content, todayISO)) return false;
+    if (isTooOldToSurface(t.content, new Date(t.created_at), tenDaysAgo)) return false;
+    return true;
+  });
 
   // LLM classify all candidates in a single API call
   const classifications = await batchClassify(candidates, todayISO, todayHuman);
