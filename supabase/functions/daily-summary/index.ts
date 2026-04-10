@@ -133,23 +133,23 @@ async function batchClassify(
       messages: [
         {
           role: "system",
-          content: `Today is ${todayISO} (${todayHuman}). Classify each captured thought for a professional morning briefing.
+          content: `Today is ${todayISO} (${todayHuman}). Classify each captured thought for a professional morning briefing. Be selective — only surface what genuinely needs attention today.
 
 Choose exactly ONE category per thought:
 • "event" — a future meeting, conference, travel, or speaking engagement the speaker will attend in person
 • "time_sensitive" — has a specific future deadline or upcoming date that has NOT yet passed
 • "waiting" — the speaker is waiting on another person's action or response
-• "open_task" — something the speaker still needs to do (no specific future date)
-• "done" — completed, historical, past-tense action, or contains a deadline/date that is BEFORE ${todayISO}
-• "skip" — too vague, purely conversational, or not actionable
+• "open_task" — something the speaker still needs to do, captured within the last 10 days
+• "done" — completed, historical, past-tense action, or contains a deadline/date BEFORE ${todayISO}
+• "skip" — too vague, conversational, not actionable, or too old to be relevant
 
 Decision rules (apply in order):
-1. Any deadline, week, or specific date mentioned that is before ${todayISO} → "done" (it is stale, do not show it)
-2. Past-tense verbs at the START of a sentence (generated, sent, finished, received, approved, created, deployed, delivered, submitted) → "done"
-3. Planning phrases like "prep for", "put together", "need to", "want to", "have to", "reach out", "follow up" ALWAYS mean the task is NOT done — classify as "open_task" or "waiting"
+1. Any deadline, week, or specific date mentioned that is before ${todayISO} → "done"
+2. Past-tense verbs at the START of a thought (generated, sent, finished, received, approved, created, deployed, delivered, submitted) → "done"
+3. Planning phrases like "prep for", "put together", "need to", "want to", "reach out", "follow up" always indicate an open task — never classify these as "done"
 4. Mentioning a place name (Clemson, Charlotte, Raleigh) does NOT make it an "event" — only use "event" if the speaker clearly states they are attending or traveling somewhere upcoming
-5. A thought captured more than 14 days ago with no future date and no urgency → "skip"
-6. When uncertain between "open_task" and "done", default to "open_task" — it is better to show something that was completed than to hide something that still needs doing
+5. Captured more than 10 days ago AND no specific future date mentioned → "skip" (it is stale background noise)
+6. When uncertain, lean toward "skip" — a clean briefing is more useful than an overwhelming one
 
 Return ONLY valid JSON, no other text:
 {"results": [{"index": 0, "category": "open_task"}, {"index": 1, "category": "done"}, ...]}`,
