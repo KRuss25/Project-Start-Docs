@@ -80,7 +80,7 @@ function isObviousDone(content: string, todayISO: string): boolean {
   ];
   if (pastTenseStarts.some((s) => text.startsWith(s))) return true;
 
-  // "Week of [month] [day]" where that week has already passed
+  // "Week of [month] [day]" where that week has fully ended (>7 days past the start date)
   const weekOfMatch = text.match(
     /\bweek of (january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/
   );
@@ -92,8 +92,9 @@ function isObviousDone(content: string, todayISO: string): boolean {
     const monthIdx = monthNames.indexOf(weekOfMatch[1]);
     if (monthIdx !== -1) {
       const year = new Date().getFullYear();
-      const dateStr = `${year}-${String(monthIdx + 1).padStart(2, "0")}-${String(parseInt(weekOfMatch[2])).padStart(2, "0")}`;
-      if (dateStr < todayISO) return true;
+      const weekStart = new Date(year, monthIdx, parseInt(weekOfMatch[2]));
+      const weekEnd = new Date(weekStart.getTime() + 7 * 24 * 60 * 60 * 1000);
+      if (weekEnd.toISOString().split("T")[0] < todayISO) return true;
     }
   }
 
