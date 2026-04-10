@@ -67,6 +67,39 @@ function isObviousSkip(content: string): boolean {
   return signals.some((s) => text.includes(s));
 }
 
+// --- Fast pre-classifier: catch obvious "done" items before LLM ---
+// These are unambiguously completed — no need to spend tokens on them.
+function isObviousDone(content: string, todayISO: string): boolean {
+  const text = content.toLowerCase().trim();
+
+  // Past-tense verb at the START of the thought → clearly already happened
+  const pastTenseStarts = [
+    "generated ", "sent ", "finished ", "completed ", "received ", "approved ",
+    "created ", "deployed ", "delivered ", "submitted ", "wrapped up", "signed ",
+    "published ", "launched ", "uploaded ", "updated ", "reviewed ", "closed ",
+  ];
+  if (pastTenseStarts.some((s) => text.startsWith(s))) return true;
+
+  // "Week of [month] [day]" where that week has already passed
+  const weekOfMatch = text.match(
+    /\bweek of (january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})/
+  );
+  if (weekOfMatch) {
+    const monthNames = [
+      "january","february","march","april","may","june",
+      "july","august","september","october","november","december",
+    ];
+    const monthIdx = monthNames.indexOf(weekOfMatch[1]);
+    if (monthIdx !== -1) {
+      const year = new Date().getFullYear();
+      const dateStr = `${year}-${String(monthIdx + 1).padStart(2, "0")}-${String(parseInt(weekOfMatch[2])).padStart(2, "0")}`;
+      if (dateStr < todayISO) return true;
+    }
+  }
+
+  return false;
+}
+
 // --- LLM batch classification ---
 // Sends all candidate thoughts to gpt-4o-mini in a single call.
 // Returns a map from array index → category.
@@ -111,10 +144,11 @@ Choose exactly ONE category per thought:
 
 Decision rules (apply in order):
 1. Any deadline, week, or specific date mentioned that is before ${todayISO} → "done" (it is stale, do not show it)
-2. Past-tense verbs (generated, sent, finished, received, approved, created, completed, updated, deployed, wrapped up, delivered, submitted) → "done"
-3. Mentioning a place name or university (like Clemson, Charlotte, Raleigh) does NOT make it an "event" — only classify as "event" if the speaker clearly states they are attending or traveling there for something upcoming
-4. A thought captured more than 14 days ago with no future date and no clear urgency → "skip"
-5. When uncertain between "open_task" and "done", lean toward "done" if the language suggests the task may already be handled
+2. Past-tense verbs at the START of a sentence (generated, sent, finished, received, approved, created, deployed, delivered, submitted) → "done"
+3. Planning phrases like "prep for", "put together", "need to", "want to", "have to", "reach out", "follow up" ALWAYS mean the task is NOT done — classify as "open_task" or "waiting"
+4. Mentioning a place name (Clemson, Charlotte, Raleigh) does NOT make it an "event" — only use "event" if the speaker clearly states they are attending or traveling somewhere upcoming
+5. A thought captured more than 14 days ago with no future date and no urgency → "skip"
+6. When uncertain between "open_task" and "done", default to "open_task" — it is better to show something that was completed than to hide something that still needs doing
 
 Return ONLY valid JSON, no other text:
 {"results": [{"index": 0, "category": "open_task"}, {"index": 1, "category": "done"}, ...]}`,
@@ -150,6 +184,8 @@ Return ONLY valid JSON, no other text:
 const stopWords = new Set([
   "the", "this", "that", "with", "have", "want", "need", "also", "just",
   "for", "and", "but", "from", "will", "been", "about", "some", "very",
+  // Instruction/emphasis words that get appended but aren't topic-defining
+  "forget", "remember", "please", "important", "noted", "dont", "note",
 ]);
 
 function fingerprint(content: string): string {
@@ -195,8 +231,10 @@ Deno.serve(async (req) => {
     });
   }
 
-  // Pre-filter obvious skips to reduce LLM token cost
-  const candidates = thoughts.filter((t) => !isObviousSkip(t.content));
+  // Pre-filter obvious skips and clear completions to reduce LLM token cost
+  const candidates = thoughts.filter(
+    (t) => !isObviousSkip(t.content) && !isObviousDone(t.content, todayISO)
+  );
 
   // Date strings for LLM prompt
   const now = new Date();
